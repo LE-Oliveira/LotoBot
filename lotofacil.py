@@ -5,54 +5,96 @@ from selenium.webdriver.support.ui import WebDriverWait
 from selenium.webdriver.support import expected_conditions as EC
 from selenium.common.exceptions import TimeoutException
 from collections import Counter
-import json
+from datetime import datetime
+import time
+import csv
 import os
+import re
 
-MAIS = True
-MENOS = False
+CSV_FILE = 'resultados_lotofacil.csv'
 
-def collect(NUMERO_JOGOS_DESEJADOS):
+def openDriver():
     driver = webdriver.Chrome()
     WEBSITE = "https://loterias.caixa.gov.br/Paginas/Lotofacil.aspx"
-    jogos = []
-
     driver.get(WEBSITE)
     driver.implicitly_wait(10)
+    return driver
 
-    elemento_jogo_inicial = driver.find_element(By.XPATH, '//div[@class="title-bar clearfix"]/h2/span').text.split(" ")[1]
-    jogoInicial = int(elemento_jogo_inicial) if elemento_jogo_inicial else 3066
-    if NUMERO_JOGOS_DESEJADOS > jogoInicial: NUMERO_JOGOS_DESEJADOS = jogoInicial
-    for i in range(NUMERO_JOGOS_DESEJADOS):
-        input_element = driver.find_element(By.CSS_SELECTOR, 'input#buscaConcurso')
-        input_element.clear()
-        input_element.send_keys(jogoInicial - i)
-        input_element.send_keys(Keys.ENTER)
+def getLastGame():
+    try:
+        with open('resultados_lotofacil.csv', 'r', newline='') as csvfile:
+            reader = csv.reader(csvfile, delimiter=';')
+            linhas = list(reader)
+            if len(linhas) <= 1:
+                return 0
+            return int(linhas[-1][0])
+    except FileNotFoundError:
+        return 0
+
+
+def getGameNumberAndDate(chromeDriver):
+    tituloJogoData = chromeDriver.find_element(By.XPATH, '//div[@class="title-bar clearfix"]/h2/span')
+    textoRepartido = tituloJogoData.text.split(" ") 
+    numeroJogo = textoRepartido[1]
+    data = re.search(r"\d{2}/\d{2}/\d{4}", textoRepartido[2]).group()
+    timestamp = int(datetime.strptime(data, "%d/%m/%Y").timestamp())
+    return {"nJogo": numeroJogo, "timestamp": timestamp}
+
+def collectResults(driver, ultimoJogo):
+    jogos = []
+    countProcessados = 0
+    jogoMaisRecente = int(getGameNumberAndDate(driver)["nJogo"])
+
+    if not os.path.exists(CSV_FILE):
+        with open(CSV_FILE, 'w', newline='') as csvfile:
+            writer = csv.writer(csvfile, delimiter=';')
+            writer.writerow(["jogo", "timestamp"] + [f"bola{i+1:02}" for i in range(15)])
+
+    for jogoAtual in range(ultimoJogo + 1, jogoMaisRecente + 1):
+        campoPesquisaJogo = driver.find_element(By.CSS_SELECTOR, 'input#buscaConcurso')
+        campoPesquisaJogo.clear()
+        campoPesquisaJogo.send_keys(jogoAtual)
+        campoPesquisaJogo.send_keys(Keys.ENTER)
         
         try:
             WebDriverWait(driver, 20).until(EC.visibility_of_element_located((By.CSS_SELECTOR, '.resultado-loteria > div > ul.simple-container.lista-dezenas.lotofacil')))
-            elemento_resultado = driver.find_element(By.XPATH, '//div[@class="resultado-loteria"]/div/ul[contains(@class, "simple-container") and contains(@class, "lista-dezenas") and contains(@class, "lotofacil")]').text
-            valores_string = ' '.join([elemento_resultado[i:i+2] for i in range(0, len(elemento_resultado), 2)])
-            jogos.append({"jogo": jogoInicial - i, "valores": valores_string})
-        except TimeoutException:
-            print("Tempo limite de espera excedido. A página pode não ter carregado corretamente ou os resultados não foram encontrados.")
-        
-    driver.quit()
 
-    with open('resultados_lotofacil.json', 'w') as file:
-        json.dump(jogos, file)
+            elementoResultado = driver.find_element(By.XPATH, '//div[@class="resultado-loteria"]/div/ul[contains(@class, "simple-container") and contains(@class, "lista-dezenas") and contains(@class, "lotofacil")]')
+            numeros = elementoResultado.text.strip().split()
+            if len(numeros) != 15:
+                print(f"Erro na leitura dos números do jogo {jogoAtual}. Pulando...")
+                continue
+
+            dataJogoAtual = getGameNumberAndDate(driver)
+            linha = [jogoAtual, dataJogoAtual["timestamp"]] + numeros
+
+            with open(CSV_FILE, 'a', newline='') as csvfile:
+                writer = csv.writer(csvfile, delimiter=';')
+                writer.writerow(linha)
+
+            countProcessados += 1
+            print(f"Adicionado jogo {jogoAtual}", end="\r")
+
+        except TimeoutException:
+            print(f"Timeout ao processar jogo {jogoAtual}")
 
 def count():
-    with open('resultados_lotofacil.json', 'r') as file:
-        dados = json.load(file)
+    if not os.path.exists(CSV_FILE):
+        print("Arquivo CSV não encontrado.")
+        return
 
     contagem_numeros = Counter()
-    valores = ""
 
-    for jogo in dados: valores += "".join(jogo['valores'])+" "
-    for numero in valores.split(" ")[:-1]: contagem_numeros[numero] += 1
+    with open(CSV_FILE, newline='') as csvfile:
+        reader = csv.reader(csvfile, delimiter=';')
+        next(reader)
+        for row in reader:
+            bolas = row[2:]
+            for numero in bolas:
+                contagem_numeros[numero] += 1
 
-    listNumber(contagem_numeros, MAIS)
-    listNumber(contagem_numeros, MENOS)
+    listNumber(contagem_numeros, True)
+    listNumber(contagem_numeros, False)
 
 def listNumber(contagem_numeros, option):
     valores = []
@@ -60,29 +102,25 @@ def listNumber(contagem_numeros, option):
     if option:
         top_15_numeros = contagem_numeros.most_common(15) 
         print("Os 15 números que mais saem na Lotofácil são:\n")
-        for numero, contgem in top_15_numeros: valores.append(numero)
+        for numero, _ in top_15_numeros: valores.append(numero)
     else:
         least_15_numeros = contagem_numeros.most_common()[-15:]
         print("\nOs 15 números que menos saem na Lotofácil são:\n")
-        for numero, contagem in least_15_numeros: valores.append(numero)
+        for numero, _ in least_15_numeros: valores.append(numero)
     valores.sort()
-    for i in range(0, 15): final += valores[i] + " "
+    final = " ".join(valores)
     print(final)
 
-def menu():
-    while True:
-        os.system("cls")
-        print("1 - Coletar resultados\n2 - Contar números\n3 - Sair")
-        opcao = input("Escolha uma opção: ")
-        if opcao == "1": 
-            numero_jogos = int(input("Digite a quantidade de jogos que deseja coletar: "))
-            collect(numero_jogos)
-        elif opcao == "2": 
-            count()
-            input("\nPressione Enter para continuar...")
-        elif opcao == "3": 
-            break
-    os.system("cls")
+def main():
+    ultimoJogo = getLastGame()
+    driver = openDriver()
+    print("Iniciando a coleta dos dados em breve", end="\r")
+    collectResults(driver, ultimoJogo)
+    driver.quit()
+    print("Coleta concluída", end="\r")
+    time.sleep(0.5)
+    print("Iniciando a contagem bruta dos resultados", end="\r")
+    count()
 
 if __name__ == "__main__":
-    menu()
+    main()

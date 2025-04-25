@@ -1,2 +1,2 @@
 # LotoBot
-Bot de previsão do resultado da Lotofacil
+Previsão dos números da Lotofácil utilizando IA
